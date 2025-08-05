@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from "react";
 import axios from "axios";
 
+const baseURL = process.env.REACT_APP_BACKEND_URL || "http://localhost:5000";
+
 function App() {
   const [url, setUrl] = useState("");
   const [info, setInfo] = useState(null);
@@ -16,13 +18,12 @@ function App() {
     if (!downloadId) return;
     const intervalId = setInterval(async () => {
       try {
-        const res = await axios.get(`http://localhost:5000/api/progress/${downloadId}`);
+        const res = await axios.get(`${baseURL}/api/progress/${downloadId}`);
         setProgress(res.data.progress || 0);
       } catch {
         setProgress(0);
       }
     }, 1000);
-
     return () => clearInterval(intervalId);
   }, [downloadId]);
 
@@ -31,7 +32,7 @@ function App() {
     setInfo(null);
     setErrorMsg(null);
     try {
-      const res = await axios.post("http://localhost:5000/api/info", { url });
+      const res = await axios.post(`${baseURL}/api/info`, { url });
       setInfo(res.data);
     } catch {
       setErrorMsg("❌ Failed to fetch video info. Please check the URL.");
@@ -44,7 +45,7 @@ function App() {
     if (!downloadId) return;
     setStopPolling(true);
     try {
-      await axios.post(`http://localhost:5000/api/cancel/${downloadId}`);
+      await axios.post(`${baseURL}/api/cancel/${downloadId}`);
       setErrorMsg("✅ Download cancelled.");
     } catch {
       setErrorMsg("⚠️ Failed to cancel download.");
@@ -67,7 +68,7 @@ function App() {
       if (stopPolling) return;
 
       try {
-        const res = await axios.get(`http://localhost:5000/api/download-file/${jobId}`, {
+        const res = await axios.get(`${baseURL}/api/download-file/${jobId}`, {
           responseType: "blob",
           validateStatus: () => true,
         });
@@ -107,7 +108,7 @@ function App() {
     setErrorMsg(null);
 
     try {
-      const res = await axios.post("http://localhost:5000/api/download", {
+      const res = await axios.post(`${baseURL}/api/download`, {
         url,
         selected_format: format,
         title: info?.title || "youtube_download",
@@ -122,12 +123,13 @@ function App() {
       resetDownloadState();
     }
   };
-const formatDuration = (seconds) => {
-  if (!seconds || isNaN(seconds)) return "-";
-  const mins = Math.floor(seconds / 60);
-  const secs = seconds % 60;
-  return `${mins}:${secs}${secs < 10 ? "0" : ""}`;
-};
+
+  const formatDuration = (seconds) => {
+    if (!seconds || isNaN(seconds)) return "-";
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs < 10 ? "0" : ""}${secs}`;
+  };
 
   const formatFileSize = (mb) =>
     !mb || isNaN(mb) ? "-" : mb > 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(2)} MB`;
@@ -192,7 +194,6 @@ const formatDuration = (seconds) => {
           <h2>{info.title}</h2>
           <p><strong>Duration:</strong> {formatDuration(info.duration)}</p>
 
-
           <div style={styles.tabSection}>
             <button
               style={{ ...styles.tab, backgroundColor: activeTab === "video" ? "#28a745" : "black" }}
@@ -228,7 +229,7 @@ const formatDuration = (seconds) => {
                   <div>
                     <strong>{f.ext.toUpperCase()}</strong> -{" "}
                     {f.audio_only ? `${f.abr || "???"} kbps Audio` : `${f.resolution || "?"}p Video`}
-                    <div style={{ fontSize: 14, color: "#999",marginTop: 6 }}>
+                    <div style={{ fontSize: 14, color: "#999", marginTop: 6 }}>
                       Size: {formatFileSize(f.filesize)}
                     </div>
                   </div>
@@ -299,155 +300,58 @@ const styles = {
     minHeight: "100vh",
     color: "#e0e0e0",
   },
-  title: {
-    fontSize: "32px",
-    marginBottom: "20px",
-    color: "#ffffff",
-  },
-  inputSection: {
-    display: "flex",
-    gap: "10px",
-    justifyContent: "center",
-    marginBottom: "20px",
-  },
+  title: { fontSize: "32px", marginBottom: "20px", color: "#ffffff" },
+  inputSection: { display: "flex", gap: "10px", justifyContent: "center", marginBottom: "20px" },
   input: {
-    padding: "12px",
-    fontSize: "16px",
-    borderRadius: "8px",
-    border: "1px solid #444",
-    width: "60%",
-    backgroundColor: "#1e1e1e",
-    color: "#fff",
+    padding: "12px", fontSize: "16px", borderRadius: "8px", border: "1px solid #444",
+    width: "60%", backgroundColor: "#1e1e1e", color: "#fff"
   },
   analyzeBtn: {
-    padding: "12px 20px",
-    borderRadius: "8px",
-    backgroundColor: "#007bff",
-    color: "white",
-    border: "none",
-    transition: "background 0.3s ease",
+    padding: "12px 20px", borderRadius: "8px", backgroundColor: "#007bff",
+    color: "white", border: "none", transition: "background 0.3s ease"
   },
   resultBox: {
-    backgroundColor: "#1e1e1e",
-    padding: "24px",
-    borderRadius: "12px",
-    marginTop: "20px",
-    boxShadow: "0 4px 12px rgba(255, 255, 255, 0.05)",
+    backgroundColor: "#1e1e1e", padding: "24px", borderRadius: "12px",
+    marginTop: "20px", boxShadow: "0 4px 12px rgba(255, 255, 255, 0.05)"
   },
   welcomeBox: {
-    backgroundColor: "#1e1e1e",
-    padding: "24px",
-    borderRadius: "12px",
-    marginTop: "20px",
-    color: "#ccc",
-    fontSize: "16px",
+    backgroundColor: "#1e1e1e", padding: "24px", borderRadius: "12px",
+    marginTop: "20px", color: "#ccc", fontSize: "16px"
   },
   spinner: {
-    width: "40px",
-    height: "40px",
-    margin: "auto",
-    border: "4px solid #444",
-    borderTop: "4px solid #28a745",
-    borderRadius: "50%",
-    animation: "spin 1s linear infinite",
+    width: "40px", height: "40px", margin: "auto", border: "4px solid #444",
+    borderTop: "4px solid #28a745", borderRadius: "50%",
+    animation: "spin 1s linear infinite"
   },
-  loadingText: {
-    marginTop: "15px",
-    fontSize: "16px",
-    color: "#ccc",
-  },
-  howItWorks: {
-    marginTop: "30px",
-    padding: "20px",
-    borderRadius: "12px",
-    backgroundColor: "#1a1a1a",
-  },
-  howTitle: {
-    fontSize: "20px",
-    marginBottom: "18px",
-    color: "#ffffff",
-  },
-  stepsContainer: {
-    display: "flex",
-    justifyContent: "space-around",
-    flexWrap: "wrap",
-    gap: "20px",
-  },
+  loadingText: { marginTop: "15px", fontSize: "16px", color: "#ccc" },
+  howItWorks: { marginTop: "30px", padding: "20px", borderRadius: "12px", backgroundColor: "#1a1a1a" },
+  howTitle: { fontSize: "20px", marginBottom: "18px", color: "#ffffff" },
+  stepsContainer: { display: "flex", justifyContent: "space-around", flexWrap: "wrap", gap: "20px" },
   stepBox: {
-    flex: "1",
-    minWidth: "200px",
-    maxWidth: "300px",
-    backgroundColor: "#2a2a2a",
-    borderRadius: "10px",
-    padding: "16px",
-    textAlign: "center",
-    color: "#ccc",
-    boxShadow: "0 2px 5px rgba(0,0,0,0.3)",
+    flex: "1", minWidth: "200px", maxWidth: "300px", backgroundColor: "#2a2a2a",
+    borderRadius: "10px", padding: "16px", textAlign: "center",
+    color: "#ccc", boxShadow: "0 2px 5px rgba(0,0,0,0.3)"
   },
-  stepEmoji: {
-    fontSize: "30px",
-    marginBottom: "8px",
-    display: "block",
-  },
-  thumbnail: {
-    width: "380px",
-    borderRadius: "10px",
-    marginBottom: "15px",
-  },
-  tabSection: {
-    display: "flex",
-    justifyContent: "center",
-    margin: "20px 0",
-  },
+  stepEmoji: { fontSize: "30px", marginBottom: "8px", display: "block" },
+  thumbnail: { width: "380px", borderRadius: "10px", marginBottom: "15px" },
+  tabSection: { display: "flex", justifyContent: "center", margin: "20px 0" },
   tab: {
-    padding: "10px 20px",
-    margin: "0 6px",
-    color: "#fff",
-    border: "none",
-    borderRadius: "8px",
-    cursor: "pointer",
-    backgroundColor: "#333",
+    padding: "10px 20px", margin: "0 6px", color: "#fff", border: "none",
+    borderRadius: "8px", cursor: "pointer", backgroundColor: "#333"
   },
-  formatList: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "12px",
-    marginTop: "20px",
-  },
+  formatList: { display: "flex", flexDirection: "column", gap: "12px", marginTop: "20px" },
   formatItem: {
-    display: "flex",
-    justifyContent: "space-between",
-    padding: "16px",
-    gap: "12px",
-    border: "1px solid #333",
-    borderRadius: "10px",
-    alignItems: "center",
-    backgroundColor: "#2c2c2c",
-    boxShadow: "0 2px 6px rgba(0,0,0,0.5)",
+    display: "flex", justifyContent: "space-between", padding: "16px", gap: "12px",
+    border: "1px solid #333", borderRadius: "10px", alignItems: "center",
+    backgroundColor: "#2c2c2c", boxShadow: "0 2px 6px rgba(0,0,0,0.5)"
   },
   selectBtn: {
-    padding: "8px 16px",
-    border: "none",
-    borderRadius: "6px",
-    color: "white",
-    fontSize: "14px",
+    padding: "8px 16px", border: "none", borderRadius: "6px",
+    color: "white", fontSize: "14px"
   },
-  progressBar: {
-    width: "160px",
-    height: "14px",
-    borderRadius: "8px",
-    backgroundColor: "#444",
-  },
-  progressText: {
-    fontSize: "13px",
-    marginTop: "4px",
-    color: "#ccc",
-  },
-  error: {
-    color: "#ff6b6b",
-    marginTop: "16px",
-    fontWeight: "bold",
-  },
+  progressBar: { width: "160px", height: "14px", borderRadius: "8px", backgroundColor: "#444" },
+  progressText: { fontSize: "13px", marginTop: "4px", color: "#ccc" },
+  error: { color: "#ff6b6b", marginTop: "16px", fontWeight: "bold" },
 };
 
 export default App;
