@@ -10,23 +10,23 @@ from threading import Event
 app = Flask(__name__)
 CORS(app)
 
-# Directory setup
 DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Clean old files on startup
+# Clean old files
 for f in os.listdir(DOWNLOAD_DIR):
     try:
         os.remove(os.path.join(DOWNLOAD_DIR, f))
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[WARN] Failed to delete old file: {f} - {e}")
 
-# Threading setup
 executor = ThreadPoolExecutor(max_workers=4)
 active_downloads = {}
 
-# Get cookie path (either env or default)
+# Path to cookies
 COOKIE_FILE = os.getenv("YTDL_COOKIE_FILE", os.path.join(os.getcwd(), "cookies.txt"))
+print(f"[INFO] Cookie file path: {COOKIE_FILE}")
+print(f"[INFO] Cookie file exists: {os.path.exists(COOKIE_FILE)}")
 
 
 def sanitize_filename(title):
@@ -81,8 +81,10 @@ def make_progress_hook(job_id):
             total = d.get("total_bytes") or d.get("total_bytes_estimate", 1)
             percent = int(downloaded * 100 / total) if total > 0 else 0
             active_downloads[job_id]["progress"] = percent
+            print(f"[DOWNLOAD] Job {job_id} progress: {percent}%")
         elif d["status"] == "finished":
             active_downloads[job_id]["progress"] = 100
+            print(f"[DOWNLOAD] Job {job_id} finished.")
     return hook
 
 
@@ -90,6 +92,8 @@ def make_progress_hook(job_id):
 def get_info():
     data = request.get_json()
     url = data.get("url")
+    print(f"[INFO] /api/info called with URL: {url}")
+
     if not url:
         return jsonify({"error": "Missing URL"}), 400
 
@@ -98,12 +102,13 @@ def get_info():
             'quiet': True,
             'noplaylist': True,
             'forceipv4': True,
-            'cookiefile': COOKIE_FILE  # 👈 Cookie support here
+            'cookiefile': COOKIE_FILE,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             formats = get_clean_formats(info.get("formats", []))
+            print(f"[INFO] Extracted info for: {info.get('title')}")
             return jsonify({
                 "title": info.get("title"),
                 "thumbnail": info.get("thumbnail"),
@@ -111,6 +116,7 @@ def get_info():
                 "formats": formats
             })
     except Exception as e:
+        print(f"[ERROR] Failed to extract info: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -130,7 +136,7 @@ def perform_download(job_id, url, selected_format, title, event):
         'ffmpeg_location': ffmpeg_path,
         'noplaylist': True,
         'quiet': True,
-        'cookiefile': COOKIE_FILE,  # 👈 Cookie support here
+        'cookiefile': COOKIE_FILE,
         'progress_hooks': [make_progress_hook(job_id)],
     }
 
@@ -145,6 +151,7 @@ def perform_download(job_id, url, selected_format, title, event):
         ydl_opts.update({'merge_output_format': 'mp4', 'remux_video': 'mp4'})
 
     try:
+        print(f"[DOWNLOAD] Starting job {job_id} with format {ydl_opts['format']}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
@@ -153,9 +160,10 @@ def perform_download(job_id, url, selected_format, title, event):
                 file_path = os.path.join(DOWNLOAD_DIR, file)
                 if not event.is_set():
                     active_downloads[job_id]["file_path"] = file_path
+                    print(f"[DOWNLOAD] Job {job_id} saved to {file_path}")
                 return
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[ERROR] Download job {job_id} failed: {e}")
 
 
 @app.route("/api/download", methods=["POST"])
@@ -164,6 +172,8 @@ def start_download():
     url = data.get("url")
     selected_format = data.get("selected_format")
     title = data.get("title", "youtube_download")
+
+    print(f"[START] Starting download for: {url} - Title: {title}")
 
     if not url or not selected_format:
         return jsonify({"error": "Missing data"}), 400
@@ -183,6 +193,7 @@ def start_download():
 
 @app.route("/api/cancel/<job_id>", methods=["POST"])
 def cancel(job_id):
+    print(f"[CANCEL] Requested cancel for job {job_id}")
     job = active_downloads.get(job_id)
     if job:
         job["event"].set()
@@ -209,12 +220,14 @@ def get_file(job_id):
     event = job["event"]
 
     if event.is_set():
+        print(f"[DOWNLOAD] Job {job_id} was cancelled. Cleaning up.")
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
         active_downloads.pop(job_id, None)
         return jsonify({"error": "Download cancelled"}), 400
 
     if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) < 1024:
+        print(f"[ERROR] Job {job_id}: File not found or too small.")
         active_downloads.pop(job_id, None)
         return jsonify({"error": "File not found or empty"}), 500
 
@@ -226,8 +239,9 @@ def get_file(job_id):
                 yield chunk
         try:
             os.remove(file_path)
-        except Exception:
-            pass
+            print(f"[CLEANUP] Deleted file after sending: {filename}")
+        except Exception as e:
+            print(f"[WARN] Failed to delete file: {e}")
 
     active_downloads.pop(job_id, None)
     return Response(
