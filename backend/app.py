@@ -1,43 +1,52 @@
+# app.py
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 import yt_dlp
 import uuid
 import os
 import shutil
+import glob
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
 app = Flask(__name__)
 CORS(app)
 
-DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+# ---- Runtime state -----------------------------------------------------------
+executor = ThreadPoolExecutor(max_workers=4)  # tune per server size
+active_downloads = {}  # { job_id: {future, event, file_path, job_dir, progress} }
 
-# Clean old files
-for f in os.listdir(DOWNLOAD_DIR):
-    try:
-        os.remove(os.path.join(DOWNLOAD_DIR, f))
-    except Exception as e:
-        print(f"[WARN] Failed to delete old file: {f} - {e}")
-
-executor = ThreadPoolExecutor(max_workers=4)
-active_downloads = {}
-
-# Path to cookies
+# Optional shared cookie file (used only if it actually exists)
 COOKIE_FILE = os.getenv("YTDL_COOKIE_FILE", os.path.join(os.getcwd(), "cookies.txt"))
 print(f"[INFO] Cookie file path: {COOKIE_FILE}")
 print(f"[INFO] Cookie file exists: {os.path.exists(COOKIE_FILE)}")
 
 
-def sanitize_filename(title):
-    return "".join(c for c in title if c.isalnum() or c in " _-.").rstrip()
+# ---- Helpers -----------------------------------------------------------------
+def optional_cookiefile():
+    """Return cookie path only if it exists; else None (no cookies used)."""
+    if COOKIE_FILE and os.path.exists(COOKIE_FILE):
+        return COOKIE_FILE
+    return None
+
+
+def make_job_dir(job_id: str) -> str:
+    """Create an isolated temp directory per job (prevents user conflicts)."""
+    d = os.path.join(tempfile.gettempdir(), "ytjobs", job_id)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def sanitize_filename(title: str) -> str:
+    return "".join(c for c in (title or "") if c.isalnum() or c in " _-.").rstrip() or "youtube_download"
 
 
 def get_clean_formats(formats):
     cleaned = []
     seen_keys = {}
 
-    for f in formats:
+    for f in formats or []:
         format_id = f.get("format_id")
         ext = f.get("ext")
         height = f.get("height")
@@ -52,13 +61,14 @@ def get_clean_formats(formats):
         is_audio_only = vcodec == "none" and acodec != "none"
         is_video_only = vcodec != "none" and acodec == "none"
 
+        # Only expose MP4 video, and audio-only (m4a/webm) which we’ll convert to MP3
         if not (ext == "mp4" or (is_audio_only and ext in ["m4a", "webm"])):
             continue
 
         cleaned_format = {
             "format_id": format_id,
             "ext": "mp3" if is_audio_only else ext,
-            "filesize": round(filesize / 1048576, 2),
+            "filesize": round(filesize / 1048576, 2),  # bytes -> MB
             "vcodec": vcodec,
             "acodec": acodec,
             "audio_only": is_audio_only,
@@ -76,21 +86,45 @@ def get_clean_formats(formats):
 
 def make_progress_hook(job_id):
     def hook(d):
-        if d["status"] == "downloading":
+        if d.get("status") == "downloading":
             downloaded = d.get("downloaded_bytes", 0)
-            total = d.get("total_bytes") or d.get("total_bytes_estimate", 1)
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
             percent = int(downloaded * 100 / total) if total > 0 else 0
-            active_downloads[job_id]["progress"] = percent
+            if job_id in active_downloads:
+                active_downloads[job_id]["progress"] = max(0, min(100, percent))
             print(f"[DOWNLOAD] Job {job_id} progress: {percent}%")
-        elif d["status"] == "finished":
-            active_downloads[job_id]["progress"] = 100
+        elif d.get("status") == "finished":
+            if job_id in active_downloads:
+                active_downloads[job_id]["progress"] = 100
             print(f"[DOWNLOAD] Job {job_id} finished.")
     return hook
 
 
+def ydl_base_opts():
+    base = {
+        "quiet": True,
+        "noplaylist": True,
+        "forceipv4": True,           # fewer IPv6 edge issues
+        "retries": 5,
+        "fragment_retries": 5,
+        "concurrent_fragment_downloads": 5,
+        "http_headers": {"User-Agent": "Mozilla/5.0"},
+    }
+    cookie = optional_cookiefile()
+    if cookie:
+        base["cookiefile"] = cookie
+    return base
+
+
+# ---- Routes ------------------------------------------------------------------
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"}), 200
+
+
 @app.route("/api/info", methods=["POST"])
 def get_info():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     url = data.get("url")
     print(f"[INFO] /api/info called with URL: {url}")
 
@@ -98,13 +132,7 @@ def get_info():
         return jsonify({"error": "Missing URL"}), 400
 
     try:
-        ydl_opts = {
-            'quiet': True,
-            'noplaylist': True,
-            'forceipv4': True,
-            'cookiefile': COOKIE_FILE,
-        }
-
+        ydl_opts = ydl_base_opts()
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             formats = get_clean_formats(info.get("formats", []))
@@ -122,53 +150,60 @@ def get_info():
 
 def perform_download(job_id, url, selected_format, title, event):
     clean_title = sanitize_filename(title)
+    job_dir = make_job_dir(job_id)
     file_id = f"{clean_title}_{uuid.uuid4().hex[:8]}"
-    output_template = os.path.join(DOWNLOAD_DIR, f"{file_id}.%(ext)s")
+    output_template = os.path.join(job_dir, f"{file_id}.%(ext)s")
     ffmpeg_path = shutil.which("ffmpeg")
 
-    is_audio = selected_format.get("audio_only", False)
-    requires_merge = selected_format.get("requires_merge", False)
+    is_audio = bool(selected_format.get("audio_only"))
+    requires_merge = bool(selected_format.get("requires_merge"))
     ydl_format = selected_format.get("format_id")
 
-    ydl_opts = {
-        'format': ydl_format,
-        'outtmpl': output_template,
-        'ffmpeg_location': ffmpeg_path,
-        'noplaylist': True,
-        'quiet': True,
-        'cookiefile': COOKIE_FILE,
-        'progress_hooks': [make_progress_hook(job_id)],
-    }
+    opts = ydl_base_opts()
+    opts.update({
+        "format": ydl_format,
+        "outtmpl": output_template,
+        "ffmpeg_location": ffmpeg_path,
+        "progress_hooks": [make_progress_hook(job_id)],
+    })
 
     if is_audio:
-        ydl_opts["postprocessors"] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
+        # convert audio-only to mp3
+        opts["postprocessors"] = [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
         }]
     elif requires_merge:
-        ydl_opts["format"] = f"{ydl_format}+bestaudio[ext=m4a]"
-        ydl_opts.update({'merge_output_format': 'mp4', 'remux_video': 'mp4'})
+        # merge video-only with best m4a audio into mp4
+        opts["format"] = f"{ydl_format}+bestaudio[ext=m4a]"
+        opts.update({"merge_output_format": "mp4", "remux_video": "mp4"})
 
     try:
-        print(f"[DOWNLOAD] Starting job {job_id} with format {ydl_opts['format']}")
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        print(f"[DOWNLOAD] Starting job {job_id} {url} -> {opts.get('format')}")
+        with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
 
-        for file in os.listdir(DOWNLOAD_DIR):
-            if file.startswith(file_id):
-                file_path = os.path.join(DOWNLOAD_DIR, file)
-                if not event.is_set():
-                    active_downloads[job_id]["file_path"] = file_path
-                    print(f"[DOWNLOAD] Job {job_id} saved to {file_path}")
-                return
+        # Find output file(s) in job_dir
+        candidates = sorted(
+            glob.glob(os.path.join(job_dir, f"{file_id}.*")),
+            key=lambda p: os.path.getmtime(p),
+            reverse=True
+        )
+
+        if candidates and not event.is_set():
+            active_downloads[job_id]["file_path"] = candidates[0]
+            active_downloads[job_id]["job_dir"] = job_dir
+            print(f"[DOWNLOAD] Job {job_id} saved to {candidates[0]}")
+        else:
+            print(f"[ERROR] Job {job_id} produced no output or was cancelled early.")
     except Exception as e:
         print(f"[ERROR] Download job {job_id} failed: {e}")
 
 
 @app.route("/api/download", methods=["POST"])
 def start_download():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     url = data.get("url")
     selected_format = data.get("selected_format")
     title = data.get("title", "youtube_download")
@@ -185,6 +220,7 @@ def start_download():
         "future": executor.submit(perform_download, job_id, url, selected_format, title, cancel_event),
         "event": cancel_event,
         "file_path": None,
+        "job_dir": None,
         "progress": 0,
     }
 
@@ -195,10 +231,13 @@ def start_download():
 def cancel(job_id):
     print(f"[CANCEL] Requested cancel for job {job_id}")
     job = active_downloads.get(job_id)
-    if job:
-        job["event"].set()
-        return jsonify({"status": "Cancelled"})
-    return jsonify({"error": "Job not found"}), 404
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+
+    job["event"].set()
+    # Note: yt-dlp does not support cooperative cancel mid-download easily.
+    # This flag prevents sending file & triggers cleanup once the worker finishes.
+    return jsonify({"status": "Cancelled"})
 
 
 @app.route("/api/progress/<job_id>", methods=["GET"])
@@ -215,41 +254,53 @@ def get_file(job_id):
     if not job:
         return jsonify({"error": "Job not found"}), 404
 
+    # Wait for the worker
     job["future"].result()
-    file_path = job["file_path"]
+    file_path = job.get("file_path")
+    job_dir = job.get("job_dir")
     event = job["event"]
+
+    def cleanup_dir():
+        try:
+            if job_dir and os.path.exists(job_dir):
+                shutil.rmtree(job_dir, ignore_errors=True)
+            print(f"[CLEANUP] Removed dir for job {job_id}")
+        except Exception as e:
+            print(f"[WARN] Cleanup failed for job {job_id}: {e}")
 
     if event.is_set():
         print(f"[DOWNLOAD] Job {job_id} was cancelled. Cleaning up.")
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
+        cleanup_dir()
         active_downloads.pop(job_id, None)
         return jsonify({"error": "Download cancelled"}), 400
 
     if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) < 1024:
         print(f"[ERROR] Job {job_id}: File not found or too small.")
+        cleanup_dir()
         active_downloads.pop(job_id, None)
         return jsonify({"error": "File not found or empty"}), 500
 
     filename = os.path.basename(file_path)
 
     def generate():
-        with open(file_path, 'rb') as f:
-            while chunk := f.read(8192):
+        with open(file_path, "rb") as f:
+            while True:
+                chunk = f.read(8192)
+                if not chunk:
+                    break
                 yield chunk
-        try:
-            os.remove(file_path)
-            print(f"[CLEANUP] Deleted file after sending: {filename}")
-        except Exception as e:
-            print(f"[WARN] Failed to delete file: {e}")
+        # After streaming, cleanup directory
+        cleanup_dir()
 
     active_downloads.pop(job_id, None)
     return Response(
         generate(),
-        mimetype='application/octet-stream',
-        headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+        mimetype="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+if __name__ == "__main__":
+    # For production use Gunicorn: gunicorn app:app --bind 0.0.0.0:5000 --workers 4 --threads 4 --timeout 0
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)

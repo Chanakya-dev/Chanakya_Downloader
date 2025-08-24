@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import axios from "axios";
 
-const baseURL = process.env.REACT_APP_BACKEND_URL || "http://localhost:5000";
+const baseURL = "https://server-download-fxza.onrender.com";
 
 function App() {
   const [url, setUrl] = useState("");
