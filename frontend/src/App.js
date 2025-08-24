@@ -1,7 +1,8 @@
+
 import React, { useState, useEffect } from "react";
 import axios from "axios";
 
-const baseURL = "https://server-download-fxza.onrender.com";
+const baseURL = "http://localhost:5000";
 
 function App() {
   const [url, setUrl] = useState("");
@@ -14,6 +15,7 @@ function App() {
   const [progress, setProgress] = useState(0);
   const [stopPolling, setStopPolling] = useState(false);
 
+  // Polling for progress
   useEffect(() => {
     if (!downloadId) return;
     const intervalId = setInterval(async () => {
@@ -26,6 +28,41 @@ function App() {
     }, 1000);
     return () => clearInterval(intervalId);
   }, [downloadId]);
+
+  // ✅ Request cookies from Chrome Extension
+  // inside App.js
+// ✅ NEW - using content script bridge
+const handleAllowCookies = () => {
+  return new Promise((resolve) => {
+    // 1. Listen for the response from content.js
+    const listener = (event) => {
+      if (event.data.type === "COOKIES_RESPONSE") {
+        window.removeEventListener("message", listener);
+        resolve(event.data.data); // response from background.js
+      }
+    };
+    window.addEventListener("message", listener);
+
+    // 2. Ask content.js to fetch cookies
+    window.postMessage({ type: "GET_COOKIES" }, "*");
+  });
+};
+
+const fetchCookies = async () => {
+  const response = await handleAllowCookies();
+  if (response?.success) {
+    console.log("✅ Cookies from extension:", response.cookies);
+
+    await axios.post(`${baseURL}/api/upload-cookies`, {
+      user_id: "chanakya_user",
+      cookies: response.cookies,
+    });
+
+    alert("✅ Cookies sent to Flask successfully!");
+  } else {
+    alert("❌ Failed to fetch cookies");
+  }
+};
 
   const handleCheckInfo = async () => {
     setAnalyzing(true);
@@ -76,10 +113,7 @@ function App() {
         if (stopPolling) return;
 
         if (res.status === 200 && res.data.size > 1000) {
-          const blob = new Blob([res.data], {
-            type: res.headers["content-type"],
-          });
-
+          const blob = new Blob([res.data], { type: res.headers["content-type"] });
           const downloadUrl = window.URL.createObjectURL(blob);
           const a = document.createElement("a");
           a.href = downloadUrl;
@@ -149,11 +183,7 @@ function App() {
       <style>
         {`
           @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-          html, body {
-            background-color: #121212;
-            margin: 0;
-            padding: 0;
-          }
+          html, body { background-color: #121212; margin: 0; padding: 0; }
           progress::-webkit-progress-bar { background-color: #444; border-radius: 8px; }
           progress::-webkit-progress-value { background-color: #28a745; border-radius: 8px; }
           progress::-moz-progress-bar { background-color: #28a745; border-radius: 8px; }
@@ -162,6 +192,18 @@ function App() {
 
       <h1 style={styles.title}>Chanakya Musical World 🎵</h1>
 
+      {/* ✅ Allow Cookies Button */}
+      <div style={{ marginBottom: "15px" }}>
+        <button 
+  onClick={fetchCookies} 
+  style={{ ...styles.analyzeBtn, backgroundColor: "#28a745" }}
+>
+  ✅ Allow (Fetch Cookies)
+</button>
+
+      </div>
+
+      {/* Input */}
       <div style={styles.inputSection}>
         <input
           type="text"
@@ -183,6 +225,7 @@ function App() {
         </button>
       </div>
 
+      {/* Results */}
       {analyzing ? (
         <div style={styles.resultBox}>
           <div style={styles.spinner}></div>
@@ -194,6 +237,7 @@ function App() {
           <h2>{info.title}</h2>
           <p><strong>Duration:</strong> {formatDuration(info.duration)}</p>
 
+          {/* Tabs */}
           <div style={styles.tabSection}>
             <button
               style={{ ...styles.tab, backgroundColor: activeTab === "video" ? "#28a745" : "black" }}
@@ -209,6 +253,7 @@ function App() {
             </button>
           </div>
 
+          {/* Formats */}
           <div style={styles.formatList}>
             {filteredFormats(activeTab).map((f) => {
               const isDownloadingThis = downloadingFormat?.format_id === f.format_id;
@@ -264,23 +309,6 @@ function App() {
         <div style={styles.welcomeBox}>
           <h2>👋 Welcome to Chanakya Downloader</h2>
           <p>Paste a YouTube URL above and click <strong>Analyze</strong> to begin your download!</p>
-          <div style={styles.howItWorks}>
-            <h3 style={styles.howTitle}>🎥 How it Works</h3>
-            <div style={styles.stepsContainer}>
-              <div style={styles.stepBox}>
-                <span style={styles.stepEmoji}>🔗</span>
-                <p><strong>Paste</strong> YouTube link in the input box</p>
-              </div>
-              <div style={styles.stepBox}>
-                <span style={styles.stepEmoji}>🎚️</span>
-                <p><strong>Choose</strong> your desired video or audio quality</p>
-              </div>
-              <div style={styles.stepBox}>
-                <span style={styles.stepEmoji}>⬇️</span>
-                <p><strong>Download</strong> and enjoy offline access</p>
-              </div>
-            </div>
-          </div>
         </div>
       )}
 
@@ -324,15 +352,6 @@ const styles = {
     animation: "spin 1s linear infinite"
   },
   loadingText: { marginTop: "15px", fontSize: "16px", color: "#ccc" },
-  howItWorks: { marginTop: "30px", padding: "20px", borderRadius: "12px", backgroundColor: "#1a1a1a" },
-  howTitle: { fontSize: "20px", marginBottom: "18px", color: "#ffffff" },
-  stepsContainer: { display: "flex", justifyContent: "space-around", flexWrap: "wrap", gap: "20px" },
-  stepBox: {
-    flex: "1", minWidth: "200px", maxWidth: "300px", backgroundColor: "#2a2a2a",
-    borderRadius: "10px", padding: "16px", textAlign: "center",
-    color: "#ccc", boxShadow: "0 2px 5px rgba(0,0,0,0.3)"
-  },
-  stepEmoji: { fontSize: "30px", marginBottom: "8px", display: "block" },
   thumbnail: { width: "380px", borderRadius: "10px", marginBottom: "15px" },
   tabSection: { display: "flex", justifyContent: "center", margin: "20px 0" },
   tab: {

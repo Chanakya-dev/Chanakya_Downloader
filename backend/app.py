@@ -15,22 +15,12 @@ CORS(app)
 
 # ---- Runtime state -----------------------------------------------------------
 executor = ThreadPoolExecutor(max_workers=4)  # tune per server size
-active_downloads = {}  # { job_id: {future, event, file_path, job_dir, progress} }
+active_downloads = {}  # { job_id: {future, event, file_path, job_dir, progress, cookie_file} }
+user_cookie_files = {}  # { user_id: cookie_file_path }
 
-# Optional shared cookie file (used only if it actually exists)
-COOKIE_FILE = os.getenv("YTDL_COOKIE_FILE", os.path.join(os.getcwd(), "cookies.txt"))
-print(f"[INFO] Cookie file path: {COOKIE_FILE}")
-print(f"[INFO] Cookie file exists: {os.path.exists(COOKIE_FILE)}")
-
-
+BASE_COOKIE_DIR = os.path.join(os.getcwd(), "storage", "cookies")
+os.makedirs(BASE_COOKIE_DIR, exist_ok=True)
 # ---- Helpers -----------------------------------------------------------------
-def optional_cookiefile():
-    """Return cookie path only if it exists; else None (no cookies used)."""
-    if COOKIE_FILE and os.path.exists(COOKIE_FILE):
-        return COOKIE_FILE
-    return None
-
-
 def make_job_dir(job_id: str) -> str:
     """Create an isolated temp directory per job (prevents user conflicts)."""
     d = os.path.join(tempfile.gettempdir(), "ytjobs", job_id)
@@ -100,19 +90,18 @@ def make_progress_hook(job_id):
     return hook
 
 
-def ydl_base_opts():
+def ydl_base_opts(cookie_file=None):
     base = {
         "quiet": True,
         "noplaylist": True,
-        "forceipv4": True,           # fewer IPv6 edge issues
+        "forceipv4": True,
         "retries": 5,
         "fragment_retries": 5,
         "concurrent_fragment_downloads": 5,
         "http_headers": {"User-Agent": "Mozilla/5.0"},
     }
-    cookie = optional_cookiefile()
-    if cookie:
-        base["cookiefile"] = cookie
+    if cookie_file and os.path.exists(cookie_file):
+        base["cookiefile"] = cookie_file
     return base
 
 
@@ -122,17 +111,41 @@ def health():
     return jsonify({"status": "ok"}), 200
 
 
+@app.route("/api/upload-cookies", methods=["POST"])
+def upload_cookies():
+    data = request.get_json(silent=True) or {}
+    user_id = data.get("user_id") or "default_user"
+    cookies = data.get("cookies")
+
+    if not cookies:
+        return jsonify({"error": "No cookies received"}), 400
+
+    # ✅ Save in persistent storage instead of /Temp
+    cookie_file = os.path.join(BASE_COOKIE_DIR, f"cookies_{user_id}.txt")
+    with open(cookie_file, "w", encoding="utf-8") as f:
+        f.write(cookies)
+
+    user_cookie_files[user_id] = cookie_file
+    print(f"[COOKIES] Persisted cookies for user {user_id} -> {cookie_file}")
+
+    return jsonify({"message": "Cookies saved", "cookie_file": cookie_file})
+
+
+
+
 @app.route("/api/info", methods=["POST"])
 def get_info():
     data = request.get_json(silent=True) or {}
     url = data.get("url")
-    print(f"[INFO] /api/info called with URL: {url}")
+    user_id = data.get("user_id")
+    print(f"[INFO] /api/info called with URL: {url} by user: {user_id}")
 
     if not url:
         return jsonify({"error": "Missing URL"}), 400
 
     try:
-        ydl_opts = ydl_base_opts()
+        cookie_file = user_cookie_files.get(user_id)
+        ydl_opts = ydl_base_opts(cookie_file)
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             formats = get_clean_formats(info.get("formats", []))
@@ -148,7 +161,7 @@ def get_info():
         return jsonify({"error": str(e)}), 500
 
 
-def perform_download(job_id, url, selected_format, title, event):
+def perform_download(job_id, url, selected_format, title, event, cookie_file=None):
     clean_title = sanitize_filename(title)
     job_dir = make_job_dir(job_id)
     file_id = f"{clean_title}_{uuid.uuid4().hex[:8]}"
@@ -159,7 +172,7 @@ def perform_download(job_id, url, selected_format, title, event):
     requires_merge = bool(selected_format.get("requires_merge"))
     ydl_format = selected_format.get("format_id")
 
-    opts = ydl_base_opts()
+    opts = ydl_base_opts(cookie_file)
     opts.update({
         "format": ydl_format,
         "outtmpl": output_template,
@@ -168,14 +181,12 @@ def perform_download(job_id, url, selected_format, title, event):
     })
 
     if is_audio:
-        # convert audio-only to mp3
         opts["postprocessors"] = [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
             "preferredquality": "192",
         }]
     elif requires_merge:
-        # merge video-only with best m4a audio into mp4
         opts["format"] = f"{ydl_format}+bestaudio[ext=m4a]"
         opts.update({"merge_output_format": "mp4", "remux_video": "mp4"})
 
@@ -184,7 +195,6 @@ def perform_download(job_id, url, selected_format, title, event):
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
 
-        # Find output file(s) in job_dir
         candidates = sorted(
             glob.glob(os.path.join(job_dir, f"{file_id}.*")),
             key=lambda p: os.path.getmtime(p),
@@ -207,21 +217,24 @@ def start_download():
     url = data.get("url")
     selected_format = data.get("selected_format")
     title = data.get("title", "youtube_download")
+    user_id = data.get("user_id")
 
-    print(f"[START] Starting download for: {url} - Title: {title}")
+    print(f"[START] Starting download for: {url} - Title: {title} - User: {user_id}")
 
     if not url or not selected_format:
         return jsonify({"error": "Missing data"}), 400
 
     job_id = str(uuid.uuid4())
     cancel_event = Event()
+    cookie_file = user_cookie_files.get(user_id)
 
     active_downloads[job_id] = {
-        "future": executor.submit(perform_download, job_id, url, selected_format, title, cancel_event),
+        "future": executor.submit(perform_download, job_id, url, selected_format, title, cancel_event, cookie_file),
         "event": cancel_event,
         "file_path": None,
         "job_dir": None,
         "progress": 0,
+        "cookie_file": cookie_file,
     }
 
     return jsonify({"job_id": job_id})
@@ -235,8 +248,6 @@ def cancel(job_id):
         return jsonify({"error": "Job not found"}), 404
 
     job["event"].set()
-    # Note: yt-dlp does not support cooperative cancel mid-download easily.
-    # This flag prevents sending file & triggers cleanup once the worker finishes.
     return jsonify({"status": "Cancelled"})
 
 
@@ -254,7 +265,6 @@ def get_file(job_id):
     if not job:
         return jsonify({"error": "Job not found"}), 404
 
-    # Wait for the worker
     job["future"].result()
     file_path = job.get("file_path")
     job_dir = job.get("job_dir")
@@ -269,13 +279,11 @@ def get_file(job_id):
             print(f"[WARN] Cleanup failed for job {job_id}: {e}")
 
     if event.is_set():
-        print(f"[DOWNLOAD] Job {job_id} was cancelled. Cleaning up.")
         cleanup_dir()
         active_downloads.pop(job_id, None)
         return jsonify({"error": "Download cancelled"}), 400
 
     if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) < 1024:
-        print(f"[ERROR] Job {job_id}: File not found or too small.")
         cleanup_dir()
         active_downloads.pop(job_id, None)
         return jsonify({"error": "File not found or empty"}), 500
@@ -289,7 +297,6 @@ def get_file(job_id):
                 if not chunk:
                     break
                 yield chunk
-        # After streaming, cleanup directory
         cleanup_dir()
 
     active_downloads.pop(job_id, None)
@@ -301,6 +308,5 @@ def get_file(job_id):
 
 
 if __name__ == "__main__":
-    # For production use Gunicorn: gunicorn app:app --bind 0.0.0.0:5000 --workers 4 --threads 4 --timeout 0
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)

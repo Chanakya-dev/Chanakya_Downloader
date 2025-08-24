@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Cookie Fetcher",
+  "version": "1.0",
+  "permissions": ["cookies", "tabs", "storage"],
+  "host_permissions": [
+    "https://*.youtube.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Chanakya Music"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://localhost:3000/*"],
+      "js": ["content.js"]
+    }
+  ]
+}
