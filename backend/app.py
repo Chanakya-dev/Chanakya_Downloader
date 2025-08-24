@@ -20,6 +20,8 @@ user_cookie_files = {}  # { user_id: cookie_file_path }
 
 BASE_COOKIE_DIR = os.path.join(os.getcwd(), "storage", "cookies")
 os.makedirs(BASE_COOKIE_DIR, exist_ok=True)
+
+
 # ---- Helpers -----------------------------------------------------------------
 def make_job_dir(job_id: str) -> str:
     """Create an isolated temp directory per job (prevents user conflicts)."""
@@ -101,7 +103,7 @@ def ydl_base_opts(cookie_file=None):
         "http_headers": {"User-Agent": "Mozilla/5.0"},
     }
     if cookie_file and os.path.exists(cookie_file):
-        base["cookiefile"] = cookie_file
+        base["cookies"] = cookie_file   # ✅ FIXED key name
     return base
 
 
@@ -120,7 +122,6 @@ def upload_cookies():
     if not cookies:
         return jsonify({"error": "No cookies received"}), 400
 
-    # ✅ Save in persistent storage instead of /Temp
     cookie_file = os.path.join(BASE_COOKIE_DIR, f"cookies_{user_id}.txt")
     with open(cookie_file, "w", encoding="utf-8") as f:
         f.write(cookies)
@@ -129,8 +130,6 @@ def upload_cookies():
     print(f"[COOKIES] Persisted cookies for user {user_id} -> {cookie_file}")
 
     return jsonify({"message": "Cookies saved", "cookie_file": cookie_file})
-
-
 
 
 @app.route("/api/info", methods=["POST"])
