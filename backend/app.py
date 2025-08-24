@@ -117,14 +117,14 @@ def health():
 def upload_cookies():
     data = request.get_json(silent=True) or {}
     user_id = data.get("user_id") or "default_user"
-    cookies = data.get("cookies")
+    cookies_txt = data.get("cookies_txt") or data.get("cookies")
 
-    if not cookies:
+    if not cookies_txt:
         return jsonify({"error": "No cookies received"}), 400
 
     cookie_file = os.path.join(BASE_COOKIE_DIR, f"cookies_{user_id}.txt")
     with open(cookie_file, "w", encoding="utf-8") as f:
-        f.write(cookies)
+        f.write(cookies_txt)
 
     user_cookie_files[user_id] = cookie_file
     print(f"[COOKIES] Persisted cookies for user {user_id} -> {cookie_file}")
@@ -228,7 +228,9 @@ def start_download():
     cookie_file = user_cookie_files.get(user_id)
 
     active_downloads[job_id] = {
-        "future": executor.submit(perform_download, job_id, url, selected_format, title, cancel_event, cookie_file),
+        "future": executor.submit(
+            perform_download, job_id, url, selected_format, title, cancel_event, cookie_file
+        ),
         "event": cancel_event,
         "file_path": None,
         "job_dir": None,
