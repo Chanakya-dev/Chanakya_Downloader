@@ -9,10 +9,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return;
       }
 
-      const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join("; ");
-      console.log("✅ Cookies fetched:", cookieStr);
+      // Generate cookies.txt format (Netscape format)
+      const cookiesTxt = cookies.map(c => {
+        return [
+          c.domain,
+          c.hostOnly ? "TRUE" : "FALSE",
+          c.path,
+          c.secure ? "TRUE" : "FALSE",
+          c.expirationDate ? c.expirationDate : "0",
+          c.name,
+          c.value
+        ].join("\t");
+      }).join("\n");
 
-      sendResponse({ success: true, cookies: cookieStr });
+      console.log("✅ cookies.txt generated for yt-dlp:", cookiesTxt);
+
+      sendResponse({ success: true, cookies: cookiesTxt });
     });
     return true; // keep async channel alive
   }

@@ -1,80 +1,92 @@
-
 import React, { useState, useEffect } from "react";
 import axios from "axios";
 
-const baseURL = "http://localhost:5000";
+const baseURL = "https://server-download-fxza.onrender.com";
 
-function App() {
-  const [url, setUrl] = useState("");
-  const [info, setInfo] = useState(null);
-  const [downloadId, setDownloadId] = useState(null);
-  const [analyzing, setAnalyzing] = useState(false);
-  const [downloadingFormat, setDownloadingFormat] = useState(null);
-  const [errorMsg, setErrorMsg] = useState(null);
-  const [activeTab, setActiveTab] = useState("video");
-  const [progress, setProgress] = useState(0);
-  const [stopPolling, setStopPolling] = useState(false);
+function LoginPage({ onCookiesUploaded, errorMsg, uploadingCookies }) {
+  const handleCookieFileUpload = async (e) => {
+    onCookiesUploaded(e);
+  };
 
-  // Polling for progress
-  useEffect(() => {
-    if (!downloadId) return;
-    const intervalId = setInterval(async () => {
-      try {
-        const res = await axios.get(`${baseURL}/api/progress/${downloadId}`);
-        setProgress(res.data.progress || 0);
-      } catch {
-        setProgress(0);
-      }
-    }, 1000);
-    return () => clearInterval(intervalId);
-  }, [downloadId]);
+  return (
+    <div style={styles.container}>
+      <h1 style={styles.title}>Chanakya Musical World 🎵</h1>
+      <div style={styles.welcomeBox}>
+        <h2>Upload YouTube Cookies</h2>
+        <p>
+          To download restricted videos, install the{" "}
+          <a
+            href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "#007bff" }}
+          >
+            Get cookies.txt LOCALLY
+          </a>{" "}
+          Chrome extension, export your YouTube cookies, and upload the cookies.txt file here.{" "}
+          <a
+            href="https://your-frontend-domain.com/cookie-guide"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "#007bff" }}
+          >
+            Learn how to export cookies
+          </a>.
+        </p>
+        <input
+          type="file"
+          accept=".txt"
+          onChange={handleCookieFileUpload}
+          disabled={uploadingCookies}
+          style={styles.input}
+        />
+        <button
+          onClick={() => document.querySelector('input[type="file"]').click()}
+          style={{ ...styles.analyzeBtn, backgroundColor: "#28a745", marginTop: "10px" }}
+          disabled={uploadingCookies}
+        >
+          {uploadingCookies ? "⏳ Uploading..." : "📂 Upload Cookies"}
+        </button>
+        {errorMsg && <p style={styles.error}>{errorMsg}</p>}
+      </div>
+    </div>
+  );
+}
 
-  // ✅ Request cookies from Chrome Extension
-  // inside App.js
-// ✅ NEW - using content script bridge
-const handleAllowCookies = () => {
-  return new Promise((resolve) => {
-    // 1. Listen for the response from content.js
-    const listener = (event) => {
-      if (event.data.type === "COOKIES_RESPONSE") {
-        window.removeEventListener("message", listener);
-        resolve(event.data.data); // response from background.js
-      }
-    };
-    window.addEventListener("message", listener);
-
-    // 2. Ask content.js to fetch cookies
-    window.postMessage({ type: "GET_COOKIES" }, "*");
-  });
-};
-
-const fetchCookies = async () => {
-  const response = await handleAllowCookies();
-  if (response?.success) {
-    console.log("✅ Cookies from extension:", response.cookies);
-
-    await axios.post(`${baseURL}/api/upload-cookies`, {
-      user_id: "chanakya_user",
-      cookies: response.cookies,
-    });
-
-    alert("✅ Cookies sent to Flask successfully!");
-  } else {
-    alert("❌ Failed to fetch cookies");
-  }
-};
-
+function MainApp({ url, setUrl, info, setInfo, downloadId, setDownloadId, analyzing, setAnalyzing, downloadingFormat, setDownloadingFormat, errorMsg, setErrorMsg, activeTab, setActiveTab, progress, setProgress, stopPolling, setStopPolling, userId, setHasCookies }) {
   const handleCheckInfo = async () => {
     setAnalyzing(true);
     setInfo(null);
     setErrorMsg(null);
     try {
-      const res = await axios.post(`${baseURL}/api/info`, { url });
+      const res = await axios.post(`${baseURL}/api/info`, { url, user_id: userId });
       setInfo(res.data);
-    } catch {
-      setErrorMsg("❌ Failed to fetch video info. Please check the URL.");
+    } catch (error) {
+      const errorMsg = error.response?.data?.error || "❌ Failed to fetch video info. Please check the URL.";
+      setErrorMsg(errorMsg);
+      if (error.response?.status === 401) {
+        setHasCookies(false);
+      }
     } finally {
       setAnalyzing(false);
+    }
+  };
+
+  const testCookies = async () => {
+    setErrorMsg(null);
+    try {
+      const res = await axios.post(`${baseURL}/api/test-cookies`, {
+        user_id: userId,
+        test_url: "https://www.youtube.com/watch?v=restricted_video_id", // Replace with a known restricted video ID
+      });
+      alert(`✅ Cookie test successful: ${res.data.title}`);
+    } catch (error) {
+      const errorMsg = error.response?.data?.error || "Failed to test cookies. Please try again.";
+      setErrorMsg(errorMsg);
+      if (error.response?.status === 401) {
+        setHasCookies(false);
+        alert("⚠️ Cookies invalid or expired. Please re-upload a valid cookies.txt file.");
+      }
     }
   };
 
@@ -100,18 +112,14 @@ const fetchCookies = async () => {
   const pollForFileDownload = async (jobId, ext) => {
     const maxRetries = 30;
     const interval = 2000;
-
     for (let i = 0; i < maxRetries; i++) {
       if (stopPolling) return;
-
       try {
         const res = await axios.get(`${baseURL}/api/download-file/${jobId}`, {
           responseType: "blob",
           validateStatus: () => true,
         });
-
         if (stopPolling) return;
-
         if (res.status === 200 && res.data.size > 1000) {
           const blob = new Blob([res.data], { type: res.headers["content-type"] });
           const downloadUrl = window.URL.createObjectURL(blob);
@@ -123,15 +131,17 @@ const fetchCookies = async () => {
           a.remove();
           return;
         }
-
         if (res.status === 400) {
           setErrorMsg("❌ Download was cancelled.");
+          return;
+        }
+        if (res.status === 401) {
+          setHasCookies(false);
           return;
         }
       } catch {}
       await new Promise((res) => setTimeout(res, interval));
     }
-
     setErrorMsg("⚠️ Download timed out or failed.");
   };
 
@@ -140,19 +150,21 @@ const fetchCookies = async () => {
     setDownloadingFormat(format);
     setStopPolling(false);
     setErrorMsg(null);
-
     try {
       const res = await axios.post(`${baseURL}/api/download`, {
         url,
         selected_format: format,
         title: info?.title || "youtube_download",
+        user_id: userId
       });
-
       const jobId = res.data.job_id;
       setDownloadId(jobId);
       await pollForFileDownload(jobId, format.ext);
-    } catch {
+    } catch (error) {
       setErrorMsg("❌ Download failed to start.");
+      if (error.response?.status === 401) {
+        setHasCookies(false);
+      }
     } finally {
       resetDownloadState();
     }
@@ -180,30 +192,15 @@ const fetchCookies = async () => {
 
   return (
     <div style={styles.container}>
-      <style>
-        {`
-          @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-          html, body { background-color: #121212; margin: 0; padding: 0; }
-          progress::-webkit-progress-bar { background-color: #444; border-radius: 8px; }
-          progress::-webkit-progress-value { background-color: #28a745; border-radius: 8px; }
-          progress::-moz-progress-bar { background-color: #28a745; border-radius: 8px; }
-        `}
-      </style>
-
       <h1 style={styles.title}>Chanakya Musical World 🎵</h1>
-
-      {/* ✅ Allow Cookies Button */}
       <div style={{ marginBottom: "15px" }}>
-        <button 
-  onClick={fetchCookies} 
-  style={{ ...styles.analyzeBtn, backgroundColor: "#28a745" }}
->
-  ✅ Allow (Fetch Cookies)
-</button>
-
+        <button
+          onClick={testCookies}
+          style={{ ...styles.analyzeBtn, backgroundColor: "#007bff" }}
+        >
+          🔍 Test Cookies
+        </button>
       </div>
-
-      {/* Input */}
       <div style={styles.inputSection}>
         <input
           type="text"
@@ -224,8 +221,6 @@ const fetchCookies = async () => {
           {analyzing ? "⏳ Analyzing..." : "🔍 Analyze"}
         </button>
       </div>
-
-      {/* Results */}
       {analyzing ? (
         <div style={styles.resultBox}>
           <div style={styles.spinner}></div>
@@ -236,8 +231,6 @@ const fetchCookies = async () => {
           <img src={info.thumbnail} alt="Thumbnail" style={styles.thumbnail} />
           <h2>{info.title}</h2>
           <p><strong>Duration:</strong> {formatDuration(info.duration)}</p>
-
-          {/* Tabs */}
           <div style={styles.tabSection}>
             <button
               style={{ ...styles.tab, backgroundColor: activeTab === "video" ? "#28a745" : "black" }}
@@ -252,13 +245,10 @@ const fetchCookies = async () => {
               🎵 Audio
             </button>
           </div>
-
-          {/* Formats */}
           <div style={styles.formatList}>
             {filteredFormats(activeTab).map((f) => {
               const isDownloadingThis = downloadingFormat?.format_id === f.format_id;
               const isDownloading = downloadingFormat !== null;
-
               return (
                 <div
                   key={f.format_id}
@@ -278,7 +268,6 @@ const fetchCookies = async () => {
                       Size: {formatFileSize(f.filesize)}
                     </div>
                   </div>
-
                   <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "center" }}>
                     {isDownloadingThis ? (
                       <>
@@ -311,9 +300,127 @@ const fetchCookies = async () => {
           <p>Paste a YouTube URL above and click <strong>Analyze</strong> to begin your download!</p>
         </div>
       )}
-
       {errorMsg && <p style={styles.error}>{errorMsg}</p>}
     </div>
+  );
+}
+
+function App() {
+  const [url, setUrl] = useState("");
+  const [info, setInfo] = useState(null);
+  const [downloadId, setDownloadId] = useState(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [downloadingFormat, setDownloadingFormat] = useState(null);
+  const [errorMsg, setErrorMsg] = useState(null);
+  const [activeTab, setActiveTab] = useState("video");
+  const [progress, setProgress] = useState(0);
+  const [stopPolling, setStopPolling] = useState(false);
+  const [hasCookies, setHasCookies] = useState(null);
+  const [uploadingCookies, setUploadingCookies] = useState(false);
+
+  const getUserId = () => {
+    let userId = localStorage.getItem("userId");
+    if (!userId) {
+      userId = crypto.randomUUID();
+      localStorage.setItem("userId", userId);
+    }
+    return userId;
+  };
+
+  const userId = getUserId();
+
+  useEffect(() => {
+    const checkCookies = async () => {
+      try {
+        const res = await axios.post(`${baseURL}/api/has-cookies`, { user_id: userId });
+        setHasCookies(res.data.has_cookies);
+      } catch {
+        setHasCookies(false);
+      }
+    };
+    checkCookies();
+  }, [userId]);
+
+  useEffect(() => {
+    if (!downloadId || stopPolling) return;
+    const intervalId = setInterval(async () => {
+      try {
+        const res = await axios.get(`${baseURL}/api/progress/${downloadId}`);
+        setProgress(res.data.progress || 0);
+      } catch {
+        setProgress(0);
+      }
+    }, 1000);
+    return () => clearInterval(intervalId);
+  }, [downloadId, stopPolling]);
+
+  const handleCookieFileUpload = async (e) => {
+    setUploadingCookies(true);
+    setErrorMsg(null);
+    const file = e.target.files[0];
+    if (!file) {
+      setErrorMsg("❌ No file selected. Please upload a cookies.txt file.");
+      setUploadingCookies(false);
+      return;
+    }
+
+    try {
+      const formData = new FormData();
+      formData.append("user_id", userId);
+      formData.append("cookies_file", file);
+      await axios.post(`${baseURL}/api/upload-cookies`, formData, {
+        headers: { "Content-Type": "multipart/form-data" }
+      });
+      setHasCookies(true);
+      alert("✅ Cookies uploaded successfully! Please test cookies to verify.");
+    } catch (error) {
+      setErrorMsg(
+        `❌ Failed to upload cookies: ${error.response?.data?.error || "Unknown error"}`
+      );
+      setHasCookies(false);
+    } finally {
+      setUploadingCookies(false);
+    }
+  };
+
+  if (hasCookies === null) {
+    return (
+      <div style={styles.container}>
+        <h1 style={styles.title}>Chanakya Musical World 🎵</h1>
+        <p>Loading...</p>
+      </div>
+    );
+  }
+
+  return hasCookies ? (
+    <MainApp
+      url={url}
+      setUrl={setUrl}
+      info={info}
+      setInfo={setInfo}
+      downloadId={downloadId}
+      setDownloadId={setDownloadId}
+      analyzing={analyzing}
+      setAnalyzing={setAnalyzing}
+      downloadingFormat={downloadingFormat}
+      setDownloadingFormat={setDownloadingFormat}
+      errorMsg={errorMsg}
+      setErrorMsg={setErrorMsg}
+      activeTab={activeTab}
+      setActiveTab={setActiveTab}
+      progress={progress}
+      setProgress={setProgress}
+      stopPolling={stopPolling}
+      setStopPolling={setStopPolling}
+      userId={userId}
+      setHasCookies={setHasCookies}
+    />
+  ) : (
+    <LoginPage
+      onCookiesUploaded={handleCookieFileUpload}
+      errorMsg={errorMsg}
+      uploadingCookies={uploadingCookies}
+    />
   );
 }
 

@@ -1,6 +1,6 @@
-// Listen to messages from React app (DOM)
+// Listen for messages from React app
 window.addEventListener("message", (event) => {
-  if (event.source !== window) return; // only accept self messages
+  if (event.source !== window) return;
 
   if (event.data.type === "GET_COOKIES") {
     console.log("📩 Content script received request from React");
@@ -8,7 +8,6 @@ window.addEventListener("message", (event) => {
     chrome.runtime.sendMessage({ action: "getCookies" }, (res) => {
       console.log("📤 Content script got response:", res);
 
-      // Send response back to React
       window.postMessage(
         { type: "COOKIES_RESPONSE", data: res },
         "*"

@@ -1,43 +1,42 @@
-# app.py
-from flask import Flask, request, jsonify, Response
-from flask_cors import CORS
-import yt_dlp
-import uuid
+import logging
 import os
 import shutil
 import glob
 import tempfile
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
+from flask import Flask, request, jsonify, Response
+from flask_cors import CORS
+import yt_dlp
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/api/*": {"origins": ["http://localhost:3000", "https://your-frontend-domain.com"]}})  # Update with your frontend URL
 
-# ---- Runtime state -----------------------------------------------------------
-executor = ThreadPoolExecutor(max_workers=4)  # tune per server size
+# Set up logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+
+# Runtime state
+executor = ThreadPoolExecutor(max_workers=2)  # Reduced for Render free tier
 active_downloads = {}  # { job_id: {future, event, file_path, job_dir, progress, cookie_file} }
 user_cookie_files = {}  # { user_id: cookie_file_path }
-
-BASE_COOKIE_DIR = os.path.join(os.getcwd(), "storage", "cookies")
+BASE_COOKIE_DIR = os.path.join("/opt/render/project", "storage", "cookies")  # Persistent storage for Render
 os.makedirs(BASE_COOKIE_DIR, exist_ok=True)
 
-
-# ---- Helpers -----------------------------------------------------------------
+# Helpers
 def make_job_dir(job_id: str) -> str:
-    """Create an isolated temp directory per job (prevents user conflicts)."""
+    """Create an isolated temp directory per job."""
     d = os.path.join(tempfile.gettempdir(), "ytjobs", job_id)
     os.makedirs(d, exist_ok=True)
     return d
 
-
 def sanitize_filename(title: str) -> str:
     return "".join(c for c in (title or "") if c.isalnum() or c in " _-.").rstrip() or "youtube_download"
-
 
 def get_clean_formats(formats):
     cleaned = []
     seen_keys = {}
-
     for f in formats or []:
         format_id = f.get("format_id")
         ext = f.get("ext")
@@ -46,17 +45,12 @@ def get_clean_formats(formats):
         vcodec = f.get("vcodec")
         acodec = f.get("acodec")
         abr = f.get("abr")
-
         if not format_id or not ext or not filesize:
             continue
-
         is_audio_only = vcodec == "none" and acodec != "none"
         is_video_only = vcodec != "none" and acodec == "none"
-
-        # Only expose MP4 video, and audio-only (m4a/webm) which we’ll convert to MP3
         if not (ext == "mp4" or (is_audio_only and ext in ["m4a", "webm"])):
             continue
-
         cleaned_format = {
             "format_id": format_id,
             "ext": "mp3" if is_audio_only else ext,
@@ -68,13 +62,10 @@ def get_clean_formats(formats):
             "abr": abr if is_audio_only else None,
             "resolution": int(height) if height else None,
         }
-
         key = f"audio_{abr}" if is_audio_only else f"video_{height}"
         if key not in seen_keys or seen_keys[key]["filesize"] > cleaned_format["filesize"]:
             seen_keys[key] = cleaned_format
-
     return list(seen_keys.values())
-
 
 def make_progress_hook(job_id):
     def hook(d):
@@ -84,13 +75,12 @@ def make_progress_hook(job_id):
             percent = int(downloaded * 100 / total) if total > 0 else 0
             if job_id in active_downloads:
                 active_downloads[job_id]["progress"] = max(0, min(100, percent))
-            print(f"[DOWNLOAD] Job {job_id} progress: {percent}%")
+            logger.info(f"[DOWNLOAD] Job {job_id} progress: {percent}%")
         elif d.get("status") == "finished":
             if job_id in active_downloads:
                 active_downloads[job_id]["progress"] = 100
-            print(f"[DOWNLOAD] Job {job_id} finished.")
+            logger.info(f"[DOWNLOAD] Job {job_id} finished.")
     return hook
-
 
 def ydl_base_opts(cookie_file=None):
     base = {
@@ -99,45 +89,102 @@ def ydl_base_opts(cookie_file=None):
         "forceipv4": True,
         "retries": 5,
         "fragment_retries": 5,
-        "concurrent_fragment_downloads": 5,
+        "concurrent_fragment_downloads": 2,
         "http_headers": {"User-Agent": "Mozilla/5.0"},
     }
     if cookie_file and os.path.exists(cookie_file):
-        base["cookies"] = cookie_file   # ✅ FIXED key name
+        base["cookiefile"] = cookie_file
     return base
 
-
-# ---- Routes ------------------------------------------------------------------
+# Routes
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"}), 200
 
-
 @app.route("/api/upload-cookies", methods=["POST"])
 def upload_cookies():
+    user_id = request.form.get("user_id") or "default_user"
+    if "cookies_file" not in request.files:
+        logger.error(f"[COOKIES] No file part in request for user {user_id}")
+        return jsonify({"error": "No cookies file uploaded. Please upload a cookies.txt file."}), 400
+
+    file = request.files["cookies_file"]
+    if file.filename == "":
+        logger.error(f"[COOKIES] No selected file for user {user_id}")
+        return jsonify({"error": "No file selected. Please upload a cookies.txt file."}), 400
+
+    if not file.filename.endswith(".txt"):
+        logger.error(f"[COOKIES] Invalid file type for user {user_id}: {file.filename}")
+        return jsonify({"error": "Invalid file type. Please upload a cookies.txt file."}), 400
+
+    try:
+        cookies_txt = file.read().decode("utf-8")
+        required_cookies = ["SID", "__Secure-3PSID"]
+        cookies_lines = cookies_txt.splitlines()
+        has_required_cookies = any(any(cookie in line for cookie in required_cookies) for line in cookies_lines)
+        if not has_required_cookies:
+            logger.error(f"[COOKIES] Invalid cookies for user {user_id}: Missing required cookies")
+            return jsonify({"error": "Invalid cookies: Missing required YouTube authentication cookies (e.g., SID, __Secure-3PSID). Please export cookies using 'Get cookies.txt LOCALLY'."}), 400
+
+        cookie_file = os.path.join(BASE_COOKIE_DIR, f"cookies_{user_id}.txt")
+        with open(cookie_file, "w", encoding="utf-8") as f:
+            f.write(cookies_txt)
+        os.chmod(cookie_file, 0o600)
+        user_cookie_files[user_id] = cookie_file
+        logger.info(f"[COOKIES] Persisted cookies for user {user_id} -> {cookie_file}")
+        return jsonify({"message": "Cookies saved", "cookie_file": cookie_file})
+    except Exception as e:
+        logger.error(f"[COOKIES] Failed to save cookies for user {user_id}: {e}")
+        return jsonify({"error": f"Failed to save cookies: {str(e)}"}), 500
+
+@app.route("/api/test-cookies", methods=["POST"])
+def test_cookies():
     data = request.get_json(silent=True) or {}
     user_id = data.get("user_id") or "default_user"
-    cookies_txt = data.get("cookies_txt") or data.get("cookies")
+    test_url = data.get("test_url") or "https://www.youtube.com/watch?v=restricted_video_id"  # Replace with a known restricted video ID
 
-    if not cookies_txt:
-        return jsonify({"error": "No cookies received"}), 400
+    cookie_file = user_cookie_files.get(user_id)
+    if not cookie_file or not os.path.exists(cookie_file):
+        logger.error(f"[COOKIES] No cookies found for user {user_id}")
+        return jsonify({"error": "No cookies found. Please upload a cookies.txt file."}), 400
 
-    cookie_file = os.path.join(BASE_COOKIE_DIR, f"cookies_{user_id}.txt")
-    with open(cookie_file, "w", encoding="utf-8") as f:
-        f.write(cookies_txt)
+    try:
+        ydl_opts = ydl_base_opts(cookie_file)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(test_url, download=False)
+            logger.info(f"[COOKIES] Cookie test successful for user {user_id}: {info.get('title')}")
+            return jsonify({
+                "status": "success",
+                "title": info.get("title"),
+                "is_restricted": bool(info.get("age_limit") or info.get("is_private")),
+            })
+    except yt_dlp.utils.DownloadError as e:
+        logger.error(f"[COOKIES] Cookie test failed for user {user_id}: {e}")
+        if "sign in" in str(e).lower() or "login required" in str(e).lower():
+            if os.path.exists(cookie_file):
+                os.remove(cookie_file)
+            user_cookie_files.pop(user_id, None)
+            return jsonify({"error": "Cookies invalid or expired. Please re-upload a valid cookies.txt file."}), 401
+        return jsonify({"error": "Failed to access video. Invalid or restricted URL."}), 400
+    except Exception as e:
+        logger.error(f"[COOKIES] Cookie test failed for user {user_id}: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-    user_cookie_files[user_id] = cookie_file
-    print(f"[COOKIES] Persisted cookies for user {user_id} -> {cookie_file}")
-
-    return jsonify({"message": "Cookies saved", "cookie_file": cookie_file})
-
+@app.route("/api/has-cookies", methods=["POST"])
+def has_cookies():
+    data = request.get_json(silent=True) or {}
+    user_id = data.get("user_id") or "default_user"
+    cookie_file = user_cookie_files.get(user_id)
+    if cookie_file and os.path.exists(cookie_file):
+        return jsonify({"has_cookies": True})
+    return jsonify({"has_cookies": False})
 
 @app.route("/api/info", methods=["POST"])
 def get_info():
     data = request.get_json(silent=True) or {}
     url = data.get("url")
     user_id = data.get("user_id")
-    print(f"[INFO] /api/info called with URL: {url} by user: {user_id}")
+    logger.info(f"[INFO] /api/info called with URL: {url} by user: {user_id}")
 
     if not url:
         return jsonify({"error": "Missing URL"}), 400
@@ -148,17 +195,25 @@ def get_info():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             formats = get_clean_formats(info.get("formats", []))
-            print(f"[INFO] Extracted info for: {info.get('title')}")
+            logger.info(f"[INFO] Extracted info for: {info.get('title')}")
             return jsonify({
                 "title": info.get("title"),
                 "thumbnail": info.get("thumbnail"),
                 "duration": info.get("duration"),
                 "formats": formats
             })
+    except yt_dlp.utils.DownloadError as e:
+        logger.error(f"[ERROR] yt-dlp failed: {e}")
+        if "sign in" in str(e).lower() or "login required" in str(e).lower():
+            cookie_file = user_cookie_files.get(user_id)
+            if cookie_file and os.path.exists(cookie_file):
+                os.remove(cookie_file)
+            user_cookie_files.pop(user_id, None)
+            return jsonify({"error": "Cookies invalid or expired. Please re-upload a valid cookies.txt file."}), 401
+        return jsonify({"error": "Failed to fetch video info. Invalid or restricted URL."}), 400
     except Exception as e:
-        print(f"[ERROR] Failed to extract info: {e}")
-        return jsonify({"error": str(e)}), 500
-
+        logger.error(f"[ERROR] Failed to extract info: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 def perform_download(job_id, url, selected_format, title, event, cookie_file=None):
     clean_title = sanitize_filename(title)
@@ -190,7 +245,7 @@ def perform_download(job_id, url, selected_format, title, event, cookie_file=Non
         opts.update({"merge_output_format": "mp4", "remux_video": "mp4"})
 
     try:
-        print(f"[DOWNLOAD] Starting job {job_id} {url} -> {opts.get('format')}")
+        logger.info(f"[DOWNLOAD] Starting job {job_id} {url} -> {opts.get('format')}")
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
 
@@ -203,12 +258,11 @@ def perform_download(job_id, url, selected_format, title, event, cookie_file=Non
         if candidates and not event.is_set():
             active_downloads[job_id]["file_path"] = candidates[0]
             active_downloads[job_id]["job_dir"] = job_dir
-            print(f"[DOWNLOAD] Job {job_id} saved to {candidates[0]}")
+            logger.info(f"[DOWNLOAD] Job {job_id} saved to {candidates[0]}")
         else:
-            print(f"[ERROR] Job {job_id} produced no output or was cancelled early.")
+            logger.error(f"[ERROR] Job {job_id} produced no output or was cancelled early.")
     except Exception as e:
-        print(f"[ERROR] Download job {job_id} failed: {e}")
-
+        logger.error(f"[ERROR] Download job {job_id} failed: {e}")
 
 @app.route("/api/download", methods=["POST"])
 def start_download():
@@ -218,7 +272,7 @@ def start_download():
     title = data.get("title", "youtube_download")
     user_id = data.get("user_id")
 
-    print(f"[START] Starting download for: {url} - Title: {title} - User: {user_id}")
+    logger.info(f"[START] Starting download for: {url} - Title: {title} - User: {user_id}")
 
     if not url or not selected_format:
         return jsonify({"error": "Missing data"}), 400
@@ -240,10 +294,9 @@ def start_download():
 
     return jsonify({"job_id": job_id})
 
-
 @app.route("/api/cancel/<job_id>", methods=["POST"])
 def cancel(job_id):
-    print(f"[CANCEL] Requested cancel for job {job_id}")
+    logger.info(f"[CANCEL] Requested cancel for job {job_id}")
     job = active_downloads.get(job_id)
     if not job:
         return jsonify({"error": "Job not found"}), 404
@@ -251,14 +304,12 @@ def cancel(job_id):
     job["event"].set()
     return jsonify({"status": "Cancelled"})
 
-
 @app.route("/api/progress/<job_id>", methods=["GET"])
 def get_progress(job_id):
     job = active_downloads.get(job_id)
     if job:
         return jsonify({"progress": job.get("progress", 0)})
     return jsonify({"error": "Job not found"}), 404
-
 
 @app.route("/api/download-file/<job_id>", methods=["GET"])
 def get_file(job_id):
@@ -275,9 +326,9 @@ def get_file(job_id):
         try:
             if job_dir and os.path.exists(job_dir):
                 shutil.rmtree(job_dir, ignore_errors=True)
-            print(f"[CLEANUP] Removed dir for job {job_id}")
+            logger.info(f"[CLEANUP] Removed dir for job {job_id}")
         except Exception as e:
-            print(f"[WARN] Cleanup failed for job {job_id}: {e}")
+            logger.warning(f"[WARN] Cleanup failed for job {job_id}: {e}")
 
     if event.is_set():
         cleanup_dir()
@@ -307,7 +358,6 @@ def get_file(job_id):
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, debug=False)
