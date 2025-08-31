@@ -23,15 +23,6 @@ function LoginPage({ onCookiesUploaded, errorMsg, uploadingCookies }) {
           >
             Get cookies.txt LOCALLY
           </a>{" "}
-          Chrome extension, export your YouTube cookies, and upload the cookies.txt file here.{" "}
-          <a
-            href="https://your-frontend-domain.com/cookie-guide"
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ color: "#007bff" }}
-          >
-            Learn how to export cookies
-          </a>.
         </p>
         <input
           type="file"
@@ -72,23 +63,6 @@ function MainApp({ url, setUrl, info, setInfo, downloadId, setDownloadId, analyz
     }
   };
 
-  const testCookies = async () => {
-    setErrorMsg(null);
-    try {
-      const res = await axios.post(`${baseURL}/api/test-cookies`, {
-        user_id: userId,
-        test_url: "https://www.youtube.com/watch?v=restricted_video_id", // Replace with a known restricted video ID
-      });
-      alert(`✅ Cookie test successful: ${res.data.title}`);
-    } catch (error) {
-      const errorMsg = error.response?.data?.error || "Failed to test cookies. Please try again.";
-      setErrorMsg(errorMsg);
-      if (error.response?.status === 401) {
-        setHasCookies(false);
-        alert("⚠️ Cookies invalid or expired. Please re-upload a valid cookies.txt file.");
-      }
-    }
-  };
 
   const handleCancelDownload = async () => {
     if (!downloadId || stopPolling) return; // Prevent multiple cancellations
@@ -210,14 +184,7 @@ function MainApp({ url, setUrl, info, setInfo, downloadId, setDownloadId, analyz
   return (
     <div style={styles.container}>
       <h1 style={styles.title}>Chanakya Musical World 🎵</h1>
-      <div style={{ marginBottom: "15px" }}>
-        <button
-          onClick={testCookies}
-          style={{ ...styles.analyzeBtn, backgroundColor: "#007bff" }}
-        >
-          🔍 Test Cookies
-        </button>
-      </div>
+     
       <div style={styles.inputSection}>
         <input
           type="text"
