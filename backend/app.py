@@ -14,7 +14,7 @@ import yt_dlp
 # Flask Setup
 # -------------------------
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": ["http://localhost:3000", "https://your-frontend-domain.com"]}})
+CORS(app, resources={r"/api/*": {"origins": ["http://localhost:3000", "https://chanakya-music.netlify.app"]}})
 
 # Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
