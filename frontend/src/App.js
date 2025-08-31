@@ -53,7 +53,7 @@ function LoginPage({ onCookiesUploaded, errorMsg, uploadingCookies }) {
   );
 }
 
-function MainApp({ url, setUrl, info, setInfo, downloadId, setDownloadId, analyzing, setAnalyzing, downloadingFormat, setDownloadingFormat, errorMsg, setErrorMsg, activeTab, setActiveTab, progress, setProgress, stopPolling, setStopPolling, userId, setHasCookies }) {
+function MainApp({ url, setUrl, info, setInfo, downloadId, setDownloadId, analyzing, setAnalyzing, downloadingFormat, setDownloadingFormat, errorMsg, setErrorMsg, activeTab, setActiveTab, progress, setProgress, stopPolling, setStopPolling, userId, setHasCookies, resetDownloadState }) {
   const handleCheckInfo = async () => {
     setAnalyzing(true);
     setInfo(null);
@@ -91,35 +91,39 @@ function MainApp({ url, setUrl, info, setInfo, downloadId, setDownloadId, analyz
   };
 
   const handleCancelDownload = async () => {
-    if (!downloadId) return;
-    setStopPolling(true);
+    if (!downloadId || stopPolling) return; // Prevent multiple cancellations
+    setStopPolling(true); // Stop all polling immediately
+    setErrorMsg("⏳ Cancelling download..."); // Immediate feedback
     try {
       await axios.post(`${baseURL}/api/cancel/${downloadId}`);
-      setErrorMsg("✅ Download cancelled.");
-    } catch {
-      setErrorMsg("⚠️ Failed to cancel download.");
+      // Add a 3-second delay to allow backend cleanup
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      setErrorMsg("✅ Download cancelled successfully.");
+      resetDownloadState(); // Reset state after backend confirms and delay
+    } catch (error) {
+      setErrorMsg("⚠️ Cancellation processed, but server reported: " + (error.response?.data?.error || "Unknown error"));
+      await new Promise((resolve) => setTimeout(resolve, 3000)); // Delay on failure too
+      resetDownloadState(); // Reset even on failure
     }
-    resetDownloadState();
-  };
-
-  const resetDownloadState = () => {
-    setDownloadingFormat(null);
-    setDownloadId(null);
-    setProgress(0);
-    setStopPolling(false);
   };
 
   const pollForFileDownload = async (jobId, ext) => {
-    const maxRetries = 30;
-    const interval = 2000;
-    for (let i = 0; i < maxRetries; i++) {
-      if (stopPolling) return;
+    const maxRetries = 40; // Increased retries to give backend more time
+    const interval = 1000; // 1-second interval for faster polling
+    let errorCount = 0; // Track consecutive errors
+    const maxErrors = 3; // Stop after 3 consecutive errors
+    for (let i = 0; i < maxRetries && errorCount < maxErrors; i++) {
+      if (stopPolling) {
+        console.log("Polling stopped due to cancellation");
+        setErrorMsg("✅ Download cancelled successfully.");
+        resetDownloadState();
+        return;
+      }
       try {
         const res = await axios.get(`${baseURL}/api/download-file/${jobId}`, {
           responseType: "blob",
           validateStatus: () => true,
         });
-        if (stopPolling) return;
         if (res.status === 200 && res.data.size > 1000) {
           const blob = new Blob([res.data], { type: res.headers["content-type"] });
           const downloadUrl = window.URL.createObjectURL(blob);
@@ -129,23 +133,37 @@ function MainApp({ url, setUrl, info, setInfo, downloadId, setDownloadId, analyz
           document.body.appendChild(a);
           a.click();
           a.remove();
+          window.URL.revokeObjectURL(downloadUrl); // Clean up URL
+          resetDownloadState();
+          return;
+        } else if (res.status === 404 || res.status === 500) {
+          errorCount++;
+          if (errorCount >= maxErrors) {
+            setErrorMsg("⚠️ Download job not found or cancelled.");
+            resetDownloadState();
+            return;
+          }
+        }
+      } catch (error) {
+        console.error("Polling error:", error);
+        errorCount++;
+        if (errorCount >= maxErrors) {
+          setErrorMsg("⚠️ Download job not found or cancelled.");
+          resetDownloadState();
           return;
         }
-        if (res.status === 400) {
-          setErrorMsg("❌ Download was cancelled.");
-          return;
-        }
-        if (res.status === 401) {
-          setHasCookies(false);
-          return;
-        }
-      } catch {}
+      }
       await new Promise((res) => setTimeout(res, interval));
     }
     setErrorMsg("⚠️ Download timed out or failed.");
+    resetDownloadState();
   };
 
   const handleFormatDownload = async (format) => {
+    if (downloadId || downloadingFormat || stopPolling) {
+      setErrorMsg("⚠️ Please wait for the current download or cancellation to complete.");
+      return; // Prevent new downloads during active download or cancellation
+    }
     resetDownloadState();
     setDownloadingFormat(format);
     setStopPolling(false);
@@ -161,11 +179,10 @@ function MainApp({ url, setUrl, info, setInfo, downloadId, setDownloadId, analyz
       setDownloadId(jobId);
       await pollForFileDownload(jobId, format.ext);
     } catch (error) {
-      setErrorMsg("❌ Download failed to start.");
+      setErrorMsg("❌ Download failed to start: " + (error.response?.data?.error || "Unknown error"));
       if (error.response?.status === 401) {
         setHasCookies(false);
       }
-    } finally {
       resetDownloadState();
     }
   };
@@ -329,6 +346,14 @@ function App() {
 
   const userId = getUserId();
 
+  const resetDownloadState = () => {
+    setDownloadingFormat(null);
+    setDownloadId(null);
+    setProgress(0);
+    setStopPolling(false);
+    setErrorMsg(null); // Clear error message for clean state
+  };
+
   useEffect(() => {
     const checkCookies = async () => {
       try {
@@ -345,10 +370,24 @@ function App() {
     if (!downloadId || stopPolling) return;
     const intervalId = setInterval(async () => {
       try {
-        const res = await axios.get(`${baseURL}/api/progress/${downloadId}`);
-        setProgress(res.data.progress || 0);
-      } catch {
+        const res = await axios.get(`${baseURL}/api/progress/${downloadId}`, {
+          responseType: "json",
+          validateStatus: () => true,
+        });
+        if (res.status === 200) {
+          setProgress(res.data.progress || 0);
+        } else if (res.status === 404 || res.status === 500) {
+          setProgress(0);
+          setStopPolling(true);
+          setErrorMsg("⚠️ Download job not found or cancelled.");
+          resetDownloadState();
+        }
+      } catch (error) {
+        console.error("Progress polling error:", error);
         setProgress(0);
+        setStopPolling(true);
+        setErrorMsg("⚠️ Download job not found or cancelled.");
+        resetDownloadState();
       }
     }, 1000);
     return () => clearInterval(intervalId);
@@ -414,6 +453,7 @@ function App() {
       setStopPolling={setStopPolling}
       userId={userId}
       setHasCookies={setHasCookies}
+      resetDownloadState={resetDownloadState}
     />
   ) : (
     <LoginPage
